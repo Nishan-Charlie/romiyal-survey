@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Curriculum Admin Panel</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+        .font-inter { font-family: 'Inter', sans-serif; }
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top: 4px solid #fff;
+            border-radius: 50%;
+            width: 1rem;
+            height: 1rem;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+    <script type="module">
+        // --- GLOBAL CONFIGURATION & STATE ---
+        const socket = io();
+        window.state = { 
+            currentQuestion: 'Loading question...', 
+            userResponses: [] 
+        };
+
+        // --- PAGE INITIALIZATION ---
+        function initializePage() {
+            document.getElementById('adminView').classList.remove('hidden');
+            document.getElementById('currentUserId').textContent = 'local-admin';
+
+            // Listen for state updates from the server
+            socket.on('state_update', (data) => {
+                console.log('Received state update from server:', data);
+                window.state.currentQuestion = data.question;
+                window.state.userResponses = data.responses;
+                document.getElementById('questionInput').value = data.question;
+                updateAnalysisView();
+            });
+        }
+        
+        // --- UTILITY FUNCTIONS ---
+        const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+        /** Displays a temporary feedback message to the user. */
+        function showTemporaryMessage(message, type) {
+            const container = document.getElementById('temporaryMessageContainer');
+            container.innerHTML = '';
+            const bgColor = type === 'success' ? 'bg-green-100 border-green-400 text-green-700' : 'bg-red-100 border-red-400 text-red-700';
+            const html = `<div class="p-3 border ${bgColor} rounded-xl mb-4 shadow-md"><p class="font-semibold">${message}</p></div>`;
+            container.innerHTML = html;
+            setTimeout(() => { container.innerHTML = ''; }, 5000);
+        }
+
+        // --- ADMIN ACTIONS ---
+
+        /** Saves the new question/prompt to the local state. */
+        window.setQuestion = function() {
+            const questionText = document.getElementById('questionInput').value.trim();
+            if (questionText) {
+                socket.emit('set_question', { question: questionText });
+                showTemporaryMessage('New question sent to all users!', 'success');
+            } else {
+                showTemporaryMessage('Please enter a question before setting it.', 'error');
+            }
+        }
+
+        /** Opens the confirmation modal to clear data. */
+        window.confirmClearData = function() {
+            const modal = document.getElementById('clearDataModal');
+            modal.classList.remove('hidden');
+        }
+
+        window.cancelClearData = function() {
+            const modal = document.getElementById('clearDataModal');
+            modal.classList.add('hidden');
+        }
+
+        /** Clears all responses from the local state. */
+        window.clearAllData = function() {
+            window.cancelClearData(); // Close modal
+            socket.emit('clear_all_data');
+            showTemporaryMessage('Clear data command sent to server.', 'success');
+        }
+
+        // --- EXPORT FUNCTIONS ---
+
+        /** Exports all data as a CSV file. */
+        window.exportCSV = function() {
+            const data = window.state.userResponses;
+            if (data.length === 0) { 
+                showTemporaryMessage("No data to export.", 'error'); 
+                return; 
+            }
+
+            let csvContent = "data:text/csv;charset=utf-8,";
+            const headers = ["ID", "User ID", "Question", "Answer", "Domain", "Confidence Score", "Justification", "Timestamp"];
+            csvContent += headers.join(",") + "\n";
+
+            const currentQuestion = window.state.currentQuestion;
+
+            data.forEach(item => {
+                const sanitize = (str) => `"${(str || '').toString().replace(/"/g, '""')}"`;
+                const row = [
+                    item.id,
+                    item.userId,
+                    sanitize(currentQuestion), // Use the single current question for all rows
+                    sanitize(item.answer),
+                    item.classification?.primaryDomain || 'N/A',
+                    item.classification?.confidenceScore || 0,
+                    sanitize(item.classification?.justification),
+                    item.timestamp ? new Date(item.timestamp.seconds * 1000).toISOString() : 'N/A'
+                ];
+                csvContent += row.join(",") + "\n";
+            });
+
+            const encodedUri = encodeURI(csvContent);
+            const link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", `survey_data_${new Date().toISOString().substring(0, 10)}.csv`);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        /** Exports the D3 chart as a PNG image. */
+        window.exportImage = function() {
+            const svgElement = document.querySelector("#classificationChart svg");
+            if (!svgElement) { 
+                showTemporaryMessage("Chart not available for export.", 'error'); 
+                return; 
+            }
+
+            const svgData = new XMLSerializer().serializeToString(svgElement);
+            const canvas = document.createElement("canvas");
+            const ctx = canvas.getContext("2d");
+            
+            const img = new Image();
+            img.onload = () => {
+                canvas.width = svgElement.getAttribute('width');
+                canvas.height = svgElement.getAttribute('height');
+                ctx.fillStyle = "#ffffff"; // Set a white background
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(img, 0, 0);
+
+                const link = document.createElement('a');
+                link.download = `classification_chart_${new Date().toISOString().substring(0, 10)}.png`;
+                link.href = canvas.toDataURL('image/png');
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            };
+            
+            img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent('<?xml version="1.0" standalone="no"?>\r\n' + svgData)));
+        }
+
+        // --- ANALYSIS VIEW LOGIC (D3.js & Data Table) ---
+
+        /** Updates the count, chart, and data table based on new response data. */
+        function updateAnalysisView() {
+            document.getElementById('totalResponsesCount').textContent = window.state.userResponses.length;
+            
+            const summary = window.state.userResponses.reduce((acc, response) => {
+                const domain = response.classification?.primaryDomain || 'Unclassified';
+                acc[domain] = (acc[domain] || 0) + 1;
+                return acc;
+            }, {});
+
+            renderBarChart(summary);
+            renderDataTable(window.state.userResponses);
+        }
+
+        /** Renders the D3.js bar chart for domain breakdown. */
+        function renderBarChart(summary) {
+            const chartDiv = document.getElementById('classificationChart');
+            chartDiv.innerHTML = '';
+            
+            const data = Object.entries(summary).map(([domain, count]) => ({ domain, count })).sort((a, b) => b.count - a.count);
+
+            if (data.length === 0) {
+                chartDiv.innerHTML = '<p class="text-center text-gray-500 mt-8">No data submitted yet to generate a chart.</p>';
+                return;
+            }
+
+            // Responsive sizing logic
+            const parentWidth = chartDiv.parentElement.clientWidth;
+            const width = Math.min(800, parentWidth - 40);
+            const height = 350;
+            const margin = { top: 20, right: 30, bottom: 100, left: 60 };
+            const innerWidth = width - margin.left - margin.right;
+            const innerHeight = height - margin.top - margin.bottom;
+
+            const svg = d3.select("#classificationChart").append("svg")
+                .attr("width", width).attr("height", height).style("display", "block").style("margin", "0 auto")
+                .append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+            const x = d3.scaleBand().range([0, innerWidth]).domain(data.map(d => d.domain)).padding(0.3);
+            const y = d3.scaleLinear().domain([0, d3.max(data, d => d.count) || 1]).range([innerHeight, 0]);
+
+            // Axes
+            svg.append("g").attr("transform", `translate(0,${innerHeight})`).call(d3.axisBottom(x))
+                .selectAll("text").attr("transform", "translate(-10,0)rotate(-45)").style("text-anchor", "end").style("font-size", "12px").style("fill", "#4b5563");
+            
+            svg.append("g").call(d3.axisLeft(y).tickFormat(d3.format("d")));
+
+            // Bars and Labels
+            svg.selectAll("mybar").data(data).join("rect")
+                .attr("x", d => x(d.domain)).attr("y", d => y(d.count)).attr("width", x.bandwidth())
+                .attr("height", d => innerHeight - y(d.count)).attr("fill", "#10b981").attr("rx", 6)
+                .style("box-shadow", "0 2px 4px rgba(0,0,0,0.1)");
+            
+            svg.selectAll(".bar-label").data(data).join("text")
+                .attr("x", d => x(d.domain) + x.bandwidth() / 2).attr("y", d => y(d.count) - 7)
+                .attr("text-anchor", "middle").text(d => d.count).style("fill", "#1f2937").style("font-size", "14px").style("font-weight", "700");
+        }
+
+        /** Renders the raw data in the HTML table. */
+        function renderDataTable(responses) {
+            const tableBody = document.getElementById('classificationTableBody');
+            tableBody.innerHTML = '';
+            if (!responses || responses.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="5" class="py-4 text-center text-gray-500">No responses collected yet.</td></tr>';
+                return;
+            }
+
+            // Sort by latest timestamp first
+            responses.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+
+            responses.forEach(response => {
+                const date = response.timestamp ? new Date(response.timestamp.seconds * 1000).toLocaleString() : 'N/A';
+                const domain = response.classification?.primaryDomain || 'N/A';
+                const confidence = ((response.classification?.confidenceScore || 0) * 100).toFixed(0) + '%';
+                const justification = response.classification?.justification || 'No justification provided.';
+                
+                const row = document.createElement('tr');
+                row.className = 'border-b last:border-b-0 hover:bg-gray-50 transition duration-150';
+                row.innerHTML = `
+                    <td class="px-4 py-3 text-xs font-mono text-gray-600">${response.userId.substring(0, 8)}...</td>
+                    <td class="px-4 py-3 text-sm font-medium text-gray-900">${response.answer.substring(0, 50)}...</td>
+                    <td class="px-4 py-3 text-sm text-green-600 font-semibold">${domain}</td>
+                    <td class="px-4 py-3 text-xs text-gray-600">${confidence}</td>
+                    <td class="px-4 py-3 text-xs text-gray-500">${justification.substring(0, 80)}...</td>
+                    <td class="px-4 py-3 text-xs text-gray-500">${date}</td>
+                `;
+                tableBody.appendChild(row);
+            });
+        }
+
+
+        // Start the application setup
+        window.onload = initializePage;
+    </script>
+</head>
+<body class="font-inter p-4 sm:p-8 min-h-screen flex items-start justify-center bg-gray-100">
+
+    <div class="w-full max-w-7xl">
+        <header class="text-center mb-8">
+            <h1 class="text-3xl sm:text-4xl font-extrabold text-gray-900 mb-2">AI Curriculum <span class="text-green-600">Admin Panel</span></h1>
+            <p class="text-gray-600">Set the prompt for the users and monitor aggregated classification results.</p>
+            <div class="mt-4 text-sm font-medium text-gray-700">
+                <a href="/survey" class="text-indigo-600 hover:text-indigo-800 transition duration-150 underline font-semibold">Go to User Submission Panel</a>
+            </div>
+        </header>
+
+        <div id="app" class="bg-white p-4 sm:p-8 rounded-2xl shadow-2xl border border-gray-200">
+            <!-- Global Messages -->
+            <div id="errorArea" class="mt-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded-xl hidden shadow-md"></div>
+            <div id="temporaryMessageContainer" class="mt-4"></div>
+            
+            <div id="adminView" class="hidden">
+                <div class="flex flex-col sm:flex-row justify-between items-center mb-6 bg-green-50 p-4 rounded-xl border border-green-200">
+                    <h2 class="text-xl font-bold text-gray-800">Admin Controls</h2>
+                    <p class="text-sm font-medium text-green-700 mt-2 sm:mt-0">
+                        Admin ID: <span class="font-mono text-xs p-1 bg-green-100 rounded-md" id="currentUserId">Loading...</span>
+                    </p>
+                </div>
+
+                <!-- 1. SET QUESTION -->
+                <div class="p-6 bg-white border border-gray-300 rounded-xl mb-8 shadow-lg">
+                    <h3 class="text-2xl font-bold text-gray-800 mb-4">Set User Prompt / Question</h3>
+                    <label for="questionInput" class="block text-lg font-semibold text-gray-700 mb-2">Question for Users:</label>
+                    <textarea id="questionInput" rows="3" class="w-full p-3 border border-gray-300 rounded-xl focus:ring-green-500 focus:border-green-500 transition duration-150 shadow-sm" placeholder="e.g., Describe a learning objective for AI in health, focusing on clinical ethics."></textarea>
+                    
+                    <div class="flex justify-between items-center mt-4">
+                        <button id="setQuestionButton" class="px-6 py-2 bg-green-600 text-white font-bold rounded-xl shadow-md hover:bg-green-700 transition duration-200 transform hover:scale-[1.01]" onclick="setQuestion()">
+                            Set New Question
+                        </button>
+                        <a href="/logout" class="px-6 py-2 bg-gray-500 text-white font-bold rounded-xl shadow-md hover:bg-gray-600 transition duration-200">
+                            Logout
+                        </a>
+                        <button id="clearDataButton" class="px-6 py-2 bg-red-600 text-white font-bold rounded-xl shadow-md hover:bg-red-700 transition duration-200 transform hover:scale-[1.01]" onclick="confirmClearData()">
+                            Clear All Response Data
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 2. AGGREGATE ANALYSIS (Chart and Table) -->
+                <h2 class="text-2xl font-bold text-gray-800 mb-4 pt-4 border-t border-gray-200">Live Aggregated Results</h2>
+
+                <div class="flex flex-wrap items-center justify-between gap-3 mb-6 p-4 bg-gray-50 rounded-xl border border-gray-200 shadow-sm">
+                    <p class="text-xl font-medium text-gray-700">Total Responses: <span id="totalResponsesCount" class="text-green-600 font-extrabold text-2xl">0</span></p>
+                    <div class="space-x-3">
+                        <button onclick="exportCSV()" class="px-4 py-2 text-sm bg-gray-200 text-gray-700 font-medium rounded-xl hover:bg-gray-300 transition duration-150 shadow-md">
+                            Download Data (CSV)
+                        </button>
+                        <button onclick="exportImage()" class="px-4 py-2 text-sm bg-gray-200 text-gray-700 font-medium rounded-xl hover:bg-gray-300 transition duration-150 shadow-md">
+                            Download Chart (PNG)
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Classification Graph -->
+                <div class="bg-white p-6 rounded-xl border border-gray-200 mb-8 shadow-md">
+                    <h3 class="text-xl font-semibold text-gray-800 mb-5 text-center border-b pb-2">Domain Classification Breakdown (Chart)</h3>
+                    <div id="classificationChart" class="w-full overflow-x-auto">
+                        <!-- D3.js chart will be rendered here -->
+                    </div>
+                </div>
+
+                <!-- Raw Data Table / Chat View -->
+                <h3 class="text-xl font-semibold text-gray-800 mb-4">All User Responses (Detailed View)</h3>
+                <div class="overflow-x-auto bg-white border border-gray-200 rounded-xl shadow-lg">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-1/12">User ID</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-3/12">Answer Snippet</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-2/12">AI Category</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-1/12">Confidence</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-3/12">AI Reason</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-2/12">Submitted At</th>
+                            </tr>
+                        </thead>
+                        <tbody id="classificationTableBody" class="bg-white divide-y divide-gray-200">
+                            <!-- Data rows will be injected here -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- CLEAR DATA CONFIRMATION MODAL -->
+            <div id="clearDataModal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center z-50">
+                <div class="bg-white p-6 rounded-xl shadow-2xl max-w-sm w-full">
+                    <h3 class="text-xl font-bold text-red-700 mb-3">Confirm Data Deletion</h3>
+                    <p class="text-gray-700 mb-6">Are you absolutely sure you want to delete **ALL** user responses? This action cannot be undone.</p>
+                    <div class="flex justify-end space-x-3">
+                        <button onclick="cancelClearData()" class="px-4 py-2 bg-gray-200 text-gray-700 font-medium rounded-xl hover:bg-gray-300">
+                            Cancel
+                        </button>
+                        <button onclick="clearAllData()" class="px-4 py-2 bg-red-600 text-white font-bold rounded-xl hover:bg-red-700">
+                            Yes, Clear All Data
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <footer class="mt-8 pt-4 border-t text-center text-sm text-gray-500">
+                Admin Interface (Local Demo)
+            </footer>
+        </div>
+    </div>
+</body>
+</html>

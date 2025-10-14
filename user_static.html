@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Curriculum User Panel (Static Demo)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        .font-inter { font-family: 'Inter', sans-serif; }
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top: 4px solid #fff;
+            border-radius: 50%;
+            width: 1rem;
+            height: 1rem;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+    <script>
+        // --- GLOBAL CONFIGURATION & STATE ---
+        // This is a static version. It calls the real AI backend but uses mock data for the aggregated view.
+        const classifyApiUrl = '/classify'; // The backend endpoint that will securely call the Gemini API
+        
+        window.state = { 
+            userId: 'static-user-123',
+            adminQuestion: 'What is your primary learning objective regarding the use of AI in medicine?', 
+            userResponses: [] 
+        };
+
+        // --- MOCK DATA for the aggregated results view ---
+        const MOCK_RESPONSES = [
+            {
+                id: 'mock1',
+                userId: 'user-abc-123',
+                answer: 'I want to learn how AI can predict patient readmission rates using EHR data.',
+                classification: {
+                    primaryDomain: 'Data Science & Analytics Skills (DSAS)',
+                    confidenceScore: 0.95,
+                    justification: 'Focuses on predictive modeling and data analysis.'
+                },
+                timestamp: { seconds: Math.floor(Date.now() / 1000) - 3600 }
+            },
+            {
+                id: 'mock2',
+                userId: 'user-def-456',
+                answer: 'How can we ensure that diagnostic algorithms for skin cancer are not biased against darker skin tones?',
+                classification: {
+                    primaryDomain: 'Ethical, Legal, and Social Implications (ELSI)',
+                    confidenceScore: 0.98,
+                    justification: 'Directly addresses algorithmic bias and fairness, a core ethical concern.'
+                },
+                timestamp: { seconds: Math.floor(Date.now() / 1000) - 7200 }
+            }
+        ];
+
+        // --- UTILITY FUNCTIONS ---
+        const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+        function showTemporaryMessage(message, type) {
+            const container = document.getElementById('temporaryMessageContainer');
+            container.innerHTML = '';
+            const bgColor = type === 'success' ? 'bg-green-100 border-green-400 text-green-700' : 'bg-red-100 border-red-400 text-red-700';
+            const html = `<div class="p-3 border ${bgColor} rounded-xl mb-4 shadow-md"><p class="font-semibold">${message}</p></div>`;
+            container.innerHTML = html;
+            setTimeout(() => { container.innerHTML = ''; }, 5000);
+        }
+
+        async function fetchWithRetry(url, options, maxRetries = 5) {
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (response.ok) return response;
+                    if (response.status === 429 && i < maxRetries - 1) {
+                        const backoffTime = Math.pow(2, i) * 1000 + Math.random() * 1000;
+                        await delay(backoffTime);
+                        continue;
+                    }
+                    throw new Error(`API returned status code ${response.status}`);
+                } catch (error) {
+                    if (i === maxRetries - 1) throw error;
+                    const backoffTime = Math.pow(2, i) * 1000 + Math.random() * 1000;
+                    await delay(backoffTime);
+                }
+            }
+        }
+
+        // --- PAGE INITIALIZATION ---
+        function initializePage() {
+            // Load mock data into the state for the aggregated view
+            window.state.userResponses = MOCK_RESPONSES;
+            
+            // Set the initial question and user ID
+            document.getElementById('currentQuestionDisplay').textContent = window.state.adminQuestion;
+            document.getElementById('currentUserId').textContent = window.state.userId;
+
+            // Render the charts and tables with the mock data
+            updateAnalysisView();
+
+            // Show the main content
+            document.getElementById('submitView').classList.remove('hidden');
+        }
+
+        // --- USER SUBMISSION LOGIC ---
+        window.submitAnswer = async function() {
+            const answerTextarea = document.getElementById('userAnswerTextarea');
+            const answerText = answerTextarea.value.trim();
+
+            if (!answerText) {
+                showTemporaryMessage('Please enter your answer.', 'error');
+                return;
+            }
+            
+            const button = document.getElementById('submitAnswerButton');
+            button.disabled = true;
+            document.getElementById('submitButtonText').textContent = 'Classifying & Submitting...';
+            document.getElementById('loadingSpinner').classList.remove('hidden');
+            document.getElementById('individualClassificationResult').classList.add('hidden');
+
+            try {
+                // 1. Call the real AI backend for classification
+                const response = await fetchWithRetry(classifyApiUrl, {
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify({ answer: answerText })
+                });
+                const classificationData = await response.json();
+
+                if (!classificationData.primaryDomain) {
+                    throw new Error(classificationData.error || "Invalid classification data received from server.");
+                }
+
+                // 2. Display Individual Classification
+                displayIndividualClassification(classificationData);
+
+                // 3. Add the new response to the local mock data for the aggregated view
+                const newResponse = {
+                    id: 'local-' + Date.now(),
+                    userId: window.state.userId,
+                    answer: answerText,
+                    classification: classificationData,
+                    timestamp: { seconds: Math.floor(Date.now() / 1000) }
+                };
+                window.state.userResponses.push(newResponse);
+                updateAnalysisView(); // Re-render the chart and table
+
+                // 4. Success Feedback
+                answerTextarea.value = '';
+                showTemporaryMessage('Success! Your answer has been submitted and classified.', 'success');
+
+            } catch (error) {
+                console.error('Submission Error:', error);
+                showTemporaryMessage(`Submission failed: ${error.message}.`, 'error');
+            } finally {
+                button.disabled = false;
+                document.getElementById('submitButtonText').textContent = 'Submit Answer & Classify';
+                document.getElementById('loadingSpinner').classList.add('hidden');
+            }
+        }
+
+        function displayIndividualClassification(data) {
+            const resultDiv = document.getElementById('individualClassificationResult');
+            const score = Math.max(0, Math.min(1, data.confidenceScore || 0));
+            const scorePercent = (score * 100).toFixed(0);
+            const scoreColor = score >= 0.8 ? 'bg-green-500' : score >= 0.5 ? 'bg-yellow-500' : 'bg-red-500';
+
+            resultDiv.innerHTML = `
+                <h3 class="text-xl font-bold text-gray-800 mb-3 border-b pb-2">Your Classification Result</h3>
+                <div class="p-4 bg-blue-50 border-l-4 border-blue-600 rounded-lg mb-4">
+                    <p class="text-lg font-semibold text-blue-800">Category: <span class="font-extrabold">${data.primaryDomain}</span></p>
+                </div>
+                <div class="bg-white border border-gray-200 rounded-lg p-3 mb-4 shadow-sm">
+                    <p class="text-sm font-semibold text-gray-700">Confidence:</p>
+                    <div class="flex items-center mt-1">
+                        <span class="text-lg font-bold text-gray-900 mr-3">${scorePercent}%</span>
+                        <div class="w-full bg-gray-200 rounded-full h-3">
+                            <div class="h-3 rounded-full ${scoreColor} transition-all duration-500 shadow-inner" style="width: ${scorePercent}%;"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="bg-gray-50 border border-gray-200 rounded-lg p-3 shadow-inner">
+                    <p class="text-sm font-semibold text-gray-700">Reason / Explanation:</p>
+                    <p class="text-gray-600 italic text-sm mt-1">${data.justification}</p>
+                </div>
+            `;
+            resultDiv.classList.remove('hidden');
+        }
+
+        // --- ANALYSIS VIEW LOGIC (D3.js & Data Table) ---
+        function updateAnalysisView() {
+            document.getElementById('totalResponsesCount').textContent = window.state.userResponses.length;
+            
+            const summary = window.state.userResponses.reduce((acc, response) => {
+                const domain = response.classification?.primaryDomain || 'Unclassified';
+                acc[domain] = (acc[domain] || 0) + 1;
+                return acc;
+            }, {});
+
+            renderBarChart(summary);
+            renderDataTable(window.state.userResponses);
+        }
+
+        function renderBarChart(summary) {
+            const chartDiv = document.getElementById('classificationChart');
+            chartDiv.innerHTML = '';
+            
+            const data = Object.entries(summary).map(([domain, count]) => ({ domain, count })).sort((a, b) => b.count - a.count);
+
+            if (data.length === 0) {
+                chartDiv.innerHTML = '<p class="text-center text-gray-500 mt-8">No data submitted yet to generate a chart.</p>';
+                return;
+            }
+
+            const parentWidth = chartDiv.parentElement.clientWidth;
+            const width = Math.min(800, parentWidth - 40);
+            const height = 350;
+            const margin = { top: 20, right: 30, bottom: 100, left: 60 };
+            const innerWidth = width - margin.left - margin.right;
+            const innerHeight = height - margin.top - margin.bottom;
+
+            const svg = d3.select("#classificationChart").append("svg")
+                .attr("width", width).attr("height", height).style("display", "block").style("margin", "0 auto")
+                .append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+            const x = d3.scaleBand().range([0, innerWidth]).domain(data.map(d => d.domain)).padding(0.3);
+            const y = d3.scaleLinear().domain([0, d3.max(data, d => d.count) || 1]).range([innerHeight, 0]);
+
+            svg.append("g").attr("transform", `translate(0,${innerHeight})`).call(d3.axisBottom(x))
+                .selectAll("text").attr("transform", "translate(-10,0)rotate(-45)").style("text-anchor", "end").style("font-size", "12px").style("fill", "#4b5563");
+            
+            svg.append("g").call(d3.axisLeft(y).tickFormat(d3.format("d")));
+
+            svg.selectAll("mybar").data(data).join("rect")
+                .attr("x", d => x(d.domain)).attr("y", d => y(d.count)).attr("width", x.bandwidth())
+                .attr("height", d => innerHeight - y(d.count)).attr("fill", "#3b82f6").attr("rx", 6);
+            
+            svg.selectAll(".bar-label").data(data).join("text")
+                .attr("x", d => x(d.domain) + x.bandwidth() / 2).attr("y", d => y(d.count) - 7)
+                .attr("text-anchor", "middle").text(d => d.count).style("fill", "#1f2937").style("font-size", "14px").style("font-weight", "700");
+        }
+
+        function renderDataTable(responses) {
+            const tableBody = document.getElementById('classificationTableBody');
+            tableBody.innerHTML = '';
+            if (responses.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="4" class="py-4 text-center text-gray-500">No responses collected yet.</td></tr>';
+                return;
+            }
+
+            responses.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+
+            responses.forEach(response => {
+                const date = response.timestamp ? new Date(response.timestamp.seconds * 1000).toLocaleString() : 'N/A';
+                const domain = response.classification?.primaryDomain || 'N/A';
+                const justification = response.classification?.justification || 'No justification provided.';
+                
+                const row = document.createElement('tr');
+                row.className = 'border-b last:border-b-0 hover:bg-gray-50 transition duration-150';
+                row.innerHTML = `
+                    <td class="px-4 py-3 text-sm font-medium text-gray-900">${response.answer.substring(0, 70)}...</td>
+                    <td class="px-4 py-3 text-sm text-blue-600 font-semibold">${domain}</td>
+                    <td class="px-4 py-3 text-xs text-gray-500">${justification.substring(0, 100)}...</td>
+                    <td class="px-4 py-3 text-xs text-gray-400">${date}</td>
+                `;
+                tableBody.appendChild(row);
+            });
+        }
+
+        // --- EXPORT FUNCTIONS ---
+        window.exportCSV = function() {
+            const data = window.state.userResponses;
+            if (data.length === 0) { showTemporaryMessage("No data to export.", 'error'); return; }
+
+            let csvContent = "data:text/csv;charset=utf-8,";
+            const headers = ["ID", "User ID", "Question", "Answer", "Domain", "Confidence Score", "Justification", "Timestamp"];
+            csvContent += headers.join(",") + "\n";
+
+            data.forEach(item => {
+                const sanitize = (str) => `"${(str || '').toString().replace(/"/g, '""')}"`;
+                const row = [
+                    item.id, item.userId, sanitize(item.question), sanitize(item.answer),
+                    item.classification?.primaryDomain || 'N/A', item.classification?.confidenceScore || 0,
+                    sanitize(item.classification?.justification),
+                    item.timestamp ? new Date(item.timestamp.seconds * 1000).toISOString() : 'N/A'
+                ];
+                csvContent += row.join(",") + "\n";
+            });
+
+            const encodedUri = encodeURI(csvContent);
+            const link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", `ai_classification_data_${new Date().toISOString().substring(0, 10)}.csv`);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        window.exportImage = function() {
+            const svgElement = document.querySelector("#classificationChart svg");
+            if (!svgElement) { showTemporaryMessage("Chart not available for export.", 'error'); return; }
+
+            const svgData = (new XMLSerializer()).serializeToString(svgElement);
+            const canvas = document.createElement("canvas");
+            const ctx = canvas.getContext("2d");
+            
+            const img = new Image();
+            img.onload = () => {
+                canvas.width = svgElement.getAttribute('width');
+                canvas.height = svgElement.getAttribute('height');
+                ctx.fillStyle = "#ffffff";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(img, 0, 0);
+
+                const link = document.createElement('a');
+                link.download = `classification_chart_${new Date().toISOString().substring(0, 10)}.png`;
+                link.href = canvas.toDataURL('image/png');
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            };
+            
+            img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent('<?xml version="1.0" standalone="no"?>\r\n' + svgData)));
+        }
+
+        // Start the application setup
+        window.onload = initializePage;
+    </script>
+</head>
+<body class="font-inter p-4 sm:p-8 min-h-screen flex items-start justify-center bg-gray-100">
+
+    <div class="w-full max-w-6xl">
+        <header class="text-center mb-8">
+            <h1 class="text-3xl sm:text-4xl font-extrabold text-gray-900 mb-2">AI Curriculum User Submission (Static Demo)</h1>
+            <p class="text-gray-600">Submit your learning objective for real-time AI classification. Aggregated results are from mock data.</p>
+        </header>
+
+        <div id="app" class="bg-white p-4 sm:p-8 rounded-2xl shadow-2xl border border-gray-200">
+            <!-- Global Messages -->
+            <div id="errorArea" class="mt-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded-xl hidden shadow-md"></div>
+            <div id="temporaryMessageContainer" class="mt-4"></div>
+            
+            <!-- SUBMISSION VIEW -->
+            <div id="submitView" class="hidden">
+                <div class="flex flex-col sm:flex-row justify-between items-center mb-6 bg-blue-50 p-4 rounded-xl border border-blue-200">
+                    <h2 class="text-xl font-bold text-gray-800">Submit Your Objective</h2>
+                    <p class="text-sm font-medium text-blue-700 mt-2 sm:mt-0">
+                        Your ID: <span class="font-mono text-xs p-1 bg-blue-100 rounded-md" id="currentUserId">Loading...</span>
+                    </p>
+                </div>
+                
+                <div class="p-4 bg-gray-50 border border-gray-200 rounded-xl mb-6 shadow-inner">
+                    <p class="text-sm font-semibold text-gray-700 mb-2">Current Prompt:</p>
+                    <p id="currentQuestionDisplay" class="text-lg font-medium text-gray-800">Loading question...</p>
+                </div>
+
+                <label for="userAnswerTextarea" class="block text-lg font-semibold text-gray-700 mb-3">Your Answer / Objective:</label>
+                <textarea id="userAnswerTextarea" rows="6" class="w-full p-4 border border-gray-300 rounded-xl focus:ring-blue-500 focus:border-blue-500 transition duration-150 shadow-md" placeholder="Type your learning objective or answer here..."></textarea>
+
+                <div class="flex justify-end mt-4 mb-8">
+                    <button id="submitAnswerButton" class="px-8 py-3 bg-blue-600 text-white font-bold rounded-xl shadow-lg hover:bg-blue-700 transition duration-200 flex items-center transform hover:scale-[1.01] active:scale-[0.99]" onclick="submitAnswer()">
+                        <span id="submitButtonText">Submit Answer & Classify</span>
+                        <div id="loadingSpinner" class="spinner ml-3 hidden"></div>
+                    </button>
+                </div>
+
+                <!-- Individual Classification Result Area -->
+                <div id="individualClassificationResult" class="p-6 bg-white border border-dashed border-blue-300 rounded-xl mb-10 shadow-inner hidden">
+                    <!-- Classification result will be injected here -->
+                </div>
+                
+                <hr class="my-10 border-gray-200">
+
+                <!-- AGGREGATE ANALYSIS (Chart and Table) -->
+                <h2 class="text-2xl font-bold text-gray-800 mb-4">Live Aggregated Results</h2>
+
+                <div class="flex flex-wrap items-center justify-between gap-3 mb-6 p-4 bg-gray-50 rounded-xl border border-gray-200 shadow-sm">
+                    <p class="text-xl font-medium text-gray-700">Total Responses: <span id="totalResponsesCount" class="text-blue-600 font-extrabold text-2xl">0</span></p>
+                    <div class="space-x-3">
+                        <button onclick="exportCSV()" class="px-4 py-2 text-sm bg-gray-200 text-gray-700 font-medium rounded-xl hover:bg-gray-300 transition duration-150 shadow-md">
+                            Download Data (CSV)
+                        </button>
+                        <button onclick="exportImage()" class="px-4 py-2 text-sm bg-gray-200 text-gray-700 font-medium rounded-xl hover:bg-gray-300 transition duration-150 shadow-md">
+                            Download Chart (PNG)
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Classification Graph -->
+                <div class="bg-white p-6 rounded-xl border border-gray-200 mb-8 shadow-md">
+                    <h3 class="text-xl font-semibold text-gray-800 mb-5 text-center border-b pb-2">Domain Classification Breakdown (Chart)</h3>
+                    <div id="classificationChart" class="w-full overflow-x-auto">
+                        <!-- D3.js chart will be rendered here -->
+                    </div>
+                </div>
+
+                <!-- Raw Data Table / Chat View -->
+                <h3 class="text-xl font-semibold text-gray-800 mb-4">Latest Responses (Raw Data)</h3>
+                <div class="overflow-x-auto bg-white border border-gray-200 rounded-xl shadow-lg">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-5/12">User Answer Snippet</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-2/12">AI Category</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-4/12">AI Reason/Explanation</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-1/12">Date</th>
+                            </tr>
+                        </thead>
+                        <tbody id="classificationTableBody" class="bg-white divide-y divide-gray-200">
+                            <!-- Data rows will be injected here -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <footer class="mt-8 pt-4 border-t text-center text-sm text-gray-500">
+                Classification powered by Gemini. Aggregated results are for demonstration only.
+            </footer>
+        </div>
+    </div>
+</body>
+</html>
