@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_from_directory, redirect, url_for, session
+from flask import Flask, request, jsonify, render_template, redirect, url_for, session
 from pydantic import ValidationError
 from flask_socketio import SocketIO, emit
 from dotenv import load_dotenv
@@ -11,7 +11,7 @@ import os
 load_dotenv()
 
 # Initialize Flask application
-app = Flask(__name__, static_folder='.', static_url_path='') 
+app = Flask(__name__) 
 # A secret key is required for session management
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "a-default-fallback-secret-key-for-dev")
 socketio = SocketIO(app)
@@ -37,7 +37,7 @@ current_question = "What is your primary learning objective regarding the use of
 @app.route('/')
 def serve_login_page():
     """Serves the main login page."""
-    return send_from_directory('.', 'login.html')
+    return render_template('login.html')
 
 @app.route('/login', methods=['POST'])
 def handle_login():
@@ -57,7 +57,7 @@ def handle_login():
 @app.route('/survey')
 def serve_user_panel():
     """Serves the user-facing survey panel."""
-    return send_from_directory('.', 'user.html')
+    return render_template('user.html')
 
 @app.route('/admin.html')
 def serve_admin_panel():
@@ -67,7 +67,7 @@ def serve_admin_panel():
         return redirect(url_for('serve_login_page'))
     
     # If logged in, serve the admin panel
-    return send_from_directory('.', 'admin.html')
+    return render_template('admin.html')
 
 @app.route('/logout')
 def logout():
@@ -134,13 +134,18 @@ def classify_objective():
         # 2. Call the core classification logic (from ai_classifier_service.py)
         classification_result = classify_learning_objective(objective=objective, api_url=GEMINI_API_URL, api_key=GEMINI_API_KEY, question=current_question, existing_categories=existing_categories)
 
+        # The user ID should be unique per session, not hardcoded.
+        if 'user_id' not in session:
+            session['user_id'] = f'user-{os.urandom(4).hex()}'
+
         # Add the new response to our in-memory list
         new_response = {
             'id': f'res-{len(user_responses) + 1}',
-            'userId': session.get('user_id', 'anonymous'), # A simple user identifier
+            'userId': session['user_id'], # A simple user identifier
             'answer': objective,
             'classification': classification_result.model_dump(),
-            'timestamp': {'seconds': int(json.loads(classification_result.model_dump_json())['timestamp'])} if 'timestamp' in classification_result.model_dump() else int(__import__('time').time())
+            # Use a consistent timestamp method
+            'timestamp': {'seconds': int(__import__('time').time())}
         }
         user_responses.append(new_response)
         socketio.emit('state_update', {'question': current_question, 'responses': user_responses})
