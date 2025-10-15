@@ -171,5 +171,5 @@ def classify_objective():
 
 if __name__ == '__main__':
     # To run this file locally, you would execute: python app.py
-    # Use socketio.run() to start the server with WebSocket support
-    socketio.run(app, debug=True)
+    # For production, use a WSGI server like Gunicorn. For local testing without debug mode:
+    socketio.run(app, debug=False, host='0.0.0.0')

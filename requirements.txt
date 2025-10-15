@@ -4,3 +4,4 @@ python-dotenv
 pydantic
 gunicorn
 requests
+eventlet
